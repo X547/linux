@@ -2,7 +2,7 @@
 VERSION = 7
 PATCHLEVEL = 1
 SUBLEVEL = 5
-EXTRAVERSION =
+EXTRAVERSION = -201.0.riscv64.omni.fc44.riscv64
 NAME = Baby Opossum Posse
 
 # *DOCUMENTATION*
