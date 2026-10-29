@@ -67,13 +67,12 @@ config DWMAC_ANARION
 	  This selects the Anarion SoC glue layer support for the stmmac driver.
 
 config DWMAC_EIC7700
-	tristate "Support for Eswin eic7700 ethernet driver"
-	depends on OF && HAS_DMA && ARCH_ESWIN || COMPILE_TEST
+	tristate "Support for Eswin EIC77xx ethernet driver"
+	select CRC32
+	select MII
+	depends on OF && HAS_DMA
 	help
-	  This driver supports the Eswin EIC7700 Ethernet controller,
-	  which integrates Synopsys DesignWare QoS features. It enables
-	  high-speed networking with DMA acceleration and is optimized
-	  for embedded systems.
+	  Support for Eswin EIC7700 ethernet driver.
 
 config DWMAC_INGENIC
 	tristate "Ingenic MAC support"
@@ -367,6 +366,12 @@ config DWMAC_VISCONTI
 	depends on OF && COMMON_CLK && (ARCH_VISCONTI || COMPILE_TEST)
 	help
 	  Support for ethernet controller on Visconti SoCs.
+
+config DWMAC_ULTRARISC
+	tristate "UltraRISC DP1000 DWMAC support"
+	depends on OF && (ARCH_ULTRARISC || COMPILE_TEST)
+	help
+	  Support for ethernet controller on DP1000 SoCs.
 
 endif # STMMAC_PLATFORM
 

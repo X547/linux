@@ -125,6 +125,8 @@ static const struct of_device_id sifive_ccache_ids[] = {
 	{ .compatible = "starfive,jh7100-ccache",
 	  .data = (void *)(QUIRK_NONSTANDARD_CACHE_OPS | QUIRK_BROKEN_DATA_UNCORR) },
 	{ .compatible = "sifive,ccache0" },
+	{ .compatible = "sifive,eic7700",
+	  .data = (void *)(QUIRK_NONSTANDARD_CACHE_OPS) },
 	{ /* end of table */ }
 };
 
@@ -169,6 +171,16 @@ static const struct riscv_nonstd_cache_ops ccache_mgmt_ops __initconst = {
 	.wback_inv = &ccache_flush_range,
 };
 #endif /* CONFIG_RISCV_NONSTANDARD_CACHE_OPS */
+
+#ifdef CONFIG_SOC_SIFIVE_EIC7700
+static void ccache_largest_way_enable(void)
+{
+	unsigned int config, ways;
+	config = readl(ccache_base + SIFIVE_CCACHE_CONFIG);
+	ways = (config >> 8) & 0xff;
+	writel(ways-1, ccache_base + SIFIVE_CCACHE_WAYENABLE);
+}
+#endif /* CONFIG_SOC_SIFIVE_EIC7700 */
 
 static int ccache_largest_wayenabled(void)
 {
@@ -316,6 +328,11 @@ static int __init sifive_ccache_init(void)
 		rc = -ENOENT;
 		goto err_unmap;
 	}
+
+#ifdef CONFIG_SOC_SIFIVE_EIC7700
+	/* Enable all the cache ways */
+	ccache_largest_way_enable();
+#endif
 
 #ifdef CONFIG_RISCV_NONSTANDARD_CACHE_OPS
 	if (quirks & QUIRK_NONSTANDARD_CACHE_OPS) {

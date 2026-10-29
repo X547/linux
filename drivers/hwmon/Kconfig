@@ -310,6 +310,15 @@ config SENSORS_AXI_FAN_CONTROL
 	  This driver can also be built as a module. If so, the module
 	  will be called axi-fan-control
 
+config SENSORS_ESWIN_FAN_CONTROL
+	tristate "ESWIN FAN Control Core driver"
+	help
+	  If you say yes here you get support for the Analog Devices
+	  ESWIN FAN monitoring core.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called eswin-fan-control
+
 config SENSORS_K8TEMP
 	tristate "AMD Athlon64/FX or Opteron temperature sensor"
 	depends on X86 && PCI
@@ -593,6 +602,12 @@ config SENSORS_DA9055
 
 	  This driver can also be built as a module. If so, the module
 	  will be called da9055-hwmon.
+
+config SENSORS_ESWIN_PVT
+	tristate "Eswin Process, Voltage, Temperature sensor driver"
+	depends on HWMON
+	help
+	  If you say yes here you get support for Eswin PVT sensor.
 
 config SENSORS_I5K_AMB
 	tristate "FB-DIMM AMB temperature sensor on Intel 5000 series chipsets"
@@ -1664,6 +1679,13 @@ config SENSORS_LM95245
 
 	  This driver can also be built as a module. If so, the module
 	  will be called lm95245.
+
+config SENSORS_PAC1934
+	tristate "microchip PAC193X  Hardware Monitoring"
+	depends on I2C
+	help
+	  If you say yes here you get support for microchip PAC193X
+	  Single/Multi-Channel DC Power/Energy  Monitor with Accumulator.
 
 config SENSORS_PC87360
 	tristate "National Semiconductor PC87360 family"

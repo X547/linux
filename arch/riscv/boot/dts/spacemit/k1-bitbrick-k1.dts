@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: GPL-2.0 OR MIT
+/*
+ * Copyright (C) 2024 Yangyu Chen <cyy@cyyself.name>
+ * Copyright (C) 2025 Javier Martinez Canillas <javierm@redhat.com>
+ */
+
+#include "k1.dtsi"
+#include "k1-pinctrl.dtsi"
+
+/ {
+	model = "Bit-Brick K1";
+	compatible = "bitbrick,k1", "spacemit,k1";
+
+	aliases {
+		ethernet0 = &eth0;
+		serial0 = &uart0;
+	};
+
+	chosen {
+		stdout-path = "serial0";
+	};
+
+ pcie_vcc_3v3: pcie-vcc3v3 {
+   compatible = "regulator-fixed";
+   regulator-name = "PCIE_VCC3V3";
+   regulator-min-microvolt = <3300000>;
+   regulator-max-microvolt = <3300000>;
+   regulator-always-on;
+ };
+};
+
+&combo_phy {
+ pinctrl-names = "default";
+ pinctrl-0 = <&pcie0_3_cfg>;
+ status = "okay";
+};
+
+&eth0 {
+	phy-handle = <&rgmii0>;
+	phy-mode = "rgmii-id";
+	pinctrl-names = "default";
+	pinctrl-0 = <&gmac0_cfg>;
+	rx-internal-delay-ps = <0>;
+	tx-internal-delay-ps = <0>;
+	status = "okay";
+
+	mdio-bus {
+		#address-cells = <0x1>;
+		#size-cells = <0x0>;
+
+		reset-gpios = <&gpio K1_GPIO(110) GPIO_ACTIVE_LOW>;
+		reset-delay-us = <10000>;
+		reset-post-delay-us = <100000>;
+
+		rgmii0: phy@1 {
+			reg = <0x1>;
+		};
+	};
+};
+
+&pdma {
+	status = "okay";
+};
+
+&pcie1_phy {
+ pinctrl-names = "default";
+ pinctrl-0 = <&pcie1_3_cfg>;
+ status = "okay";
+};
+
+&pcie1_port {
+ phys = <&pcie1_phy>;
+};
+
+&pcie1 {
+ vpcie3v3-supply = <&pcie_vcc_3v3>;
+ status = "okay";
+};
+
+&pcie2_phy {
+ pinctrl-names = "default";
+ pinctrl-0 = <&pcie2_4_cfg>;
+ status = "okay";
+};
+
+&pcie2_port {
+ phys = <&pcie2_phy>;
+};
+
+&pcie2 {
+ vpcie3v3-supply = <&pcie_vcc_3v3>;
+ status = "okay";
+};
+
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_2_cfg>;
+	status = "okay";
+};

@@ -199,6 +199,12 @@ extern struct pt_alloc_ops pt_ops __meminitdata;
 #define _PAGE_IOREMAP	((_PAGE_KERNEL & ~_PAGE_MTMASK) | _PAGE_IO)
 #define PAGE_KERNEL_IO		__pgprot(_PAGE_IOREMAP)
 
+/* Set of bits to preserve across pte_modify() */
+#define _PAGE_CHG_MASK  (~(unsigned long)(_PAGE_PRESENT | _PAGE_READ |	\
+					  _PAGE_WRITE | _PAGE_EXEC |	\
+					  _PAGE_USER | _PAGE_GLOBAL |	\
+					  _PAGE_MTMASK))
+
 extern pgd_t swapper_pg_dir[];
 extern pgd_t trampoline_pg_dir[];
 extern pgd_t early_pg_dir[];
@@ -249,26 +255,26 @@ static inline void pmd_clear(pmd_t *pmdp)
 
 static inline pgd_t pfn_pgd(unsigned long pfn, pgprot_t prot)
 {
-	unsigned long prot_val = pgprot_val(prot);
+	pgd_t pgd = __pgd((pfn << _PAGE_PFN_SHIFT) | pgprot_val(prot));
 
-	ALT_THEAD_PMA(prot_val);
+	ALT_FIXUP_MT(pgd);
 
-	return __pgd((pfn << _PAGE_PFN_SHIFT) | prot_val);
+	return pgd;
 }
 
-static inline unsigned long _pgd_pfn(pgd_t pgd)
+static inline unsigned long pmd_pfn(pmd_t pmd)
 {
-	return __page_val_to_pfn(pgd_val(pgd));
+	return __page_val_to_pfn(pmd_val(pmd));
 }
 
 static inline struct page *pmd_page(pmd_t pmd)
 {
-	return pfn_to_page(__page_val_to_pfn(pmd_val(pmd)));
+	return pfn_to_page(pmd_pfn(pmd));
 }
 
 static inline unsigned long pmd_page_vaddr(pmd_t pmd)
 {
-	return (unsigned long)pfn_to_virt(__page_val_to_pfn(pmd_val(pmd)));
+	return (unsigned long)pfn_to_virt(pmd_pfn(pmd));
 }
 
 static inline pte_t pmd_pte(pmd_t pmd)
@@ -316,7 +322,10 @@ static inline unsigned long pte_napot(pte_t pte)
 /* Yields the page frame number (PFN) of a page table entry */
 static inline unsigned long pte_pfn(pte_t pte)
 {
-	unsigned long res  = __page_val_to_pfn(pte_val(pte));
+	unsigned long res;
+
+	ALT_UNFIX_MT(pte);
+	res  = __page_val_to_pfn(pte_val(pte));
 
 	if (has_svnapot() && pte_napot(pte))
 		res = res & (res - 1UL);
@@ -329,11 +338,11 @@ static inline unsigned long pte_pfn(pte_t pte)
 /* Constructs a page table entry */
 static inline pte_t pfn_pte(unsigned long pfn, pgprot_t prot)
 {
-	unsigned long prot_val = pgprot_val(prot);
+	pte_t pte = __pte((pfn << _PAGE_PFN_SHIFT) | pgprot_val(prot));
 
-	ALT_THEAD_PMA(prot_val);
+	ALT_FIXUP_MT(pte);
 
-	return __pte((pfn << _PAGE_PFN_SHIFT) | prot_val);
+	return pte;
 }
 
 #define pte_pgprot pte_pgprot
@@ -554,9 +563,11 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 {
 	unsigned long newprot_val = pgprot_val(newprot);
 
-	ALT_THEAD_PMA(newprot_val);
+	ALT_UNFIX_MT(pte);
+	pte = __pte((pte_val(pte) & _PAGE_CHG_MASK) | newprot_val);
+	ALT_FIXUP_MT(pte);
 
-	return __pte((pte_val(pte) & _PAGE_CHG_MASK) | newprot_val);
+	return pte;
 }
 
 #define pgd_ERROR(e) \
@@ -775,21 +786,6 @@ static inline pmd_t pmd_mkinvalid(pmd_t pmd)
 	return __pmd(pmd_val(pmd) & ~(_PAGE_PRESENT|_PAGE_PROT_NONE));
 }
 
-#define __pmd_to_phys(pmd)  (__page_val_to_pfn(pmd_val(pmd)) << PAGE_SHIFT)
-
-static inline unsigned long pmd_pfn(pmd_t pmd)
-{
-	return ((__pmd_to_phys(pmd) & PMD_MASK) >> PAGE_SHIFT);
-}
-
-#define __pud_to_phys(pud)  (__page_val_to_pfn(pud_val(pud)) << PAGE_SHIFT)
-
-#define pud_pfn pud_pfn
-static inline unsigned long pud_pfn(pud_t pud)
-{
-	return ((__pud_to_phys(pud) & PUD_MASK) >> PAGE_SHIFT);
-}
-
 #define pmd_pgprot pmd_pgprot
 static inline pgprot_t pmd_pgprot(pmd_t pmd)
 {
@@ -986,7 +982,14 @@ static inline bool pte_user_accessible_page(struct mm_struct *mm, unsigned long 
 
 static inline bool pmd_user_accessible_page(struct mm_struct *mm, unsigned long addr, pmd_t pmd)
 {
-	return pmd_leaf(pmd) && pmd_user(pmd);
+	/*
+	 * page_table_check() must ignore THP split invalidation entries created by
+	 * pmd_mkinvalid(). These retain _PAGE_LEAF so pmd_present()/pmd_leaf() stay
+	 * true during the split, but they no longer describe a user-accessible
+	 * mapping once both _PAGE_PRESENT and _PAGE_PROT_NONE are cleared.
+	 */
+	return (pmd_val(pmd) & (_PAGE_PRESENT | _PAGE_PROT_NONE)) &&
+		(pmd_val(pmd) & _PAGE_LEAF) && pmd_user(pmd);
 }
 
 static inline bool pud_user_accessible_page(struct mm_struct *mm, unsigned long addr, pud_t pud)
@@ -1273,6 +1276,14 @@ extern u64 satp_mode;
 
 void paging_init(void);
 void misc_mem_init(void);
+
+#ifdef CONFIG_RISCV_ISA_SVPBMT
+bool __init riscv_have_memory_alias(void);
+void __init riscv_init_memory_alias(void);
+#else
+static inline bool riscv_have_memory_alias(void) { return false; }
+static inline void riscv_init_memory_alias(void) {}
+#endif /* CONFIG_RISCV_ISA_SVPBMT */
 
 /*
  * Use set_p*_safe(), and elide TLB flushing, when confident that *no*

@@ -210,19 +210,6 @@ config PINCTRL_DIGICOLOR
 	select PINMUX
 	select GENERIC_PINCONF
 
-config PINCTRL_EIC7700
-	tristate "EIC7700 PINCTRL driver"
-	depends on ARCH_ESWIN || COMPILE_TEST
-	select PINMUX
-	select GENERIC_PINCONF
-	select REGULATOR
-	select REGULATOR_FIXED_VOLTAGE
-	help
-	  This driver support for the pin controller in ESWIN's EIC7700 SoC,
-	  which supports pin multiplexing, pin configuration,and rgmii voltage
-	  control.
-	  Say Y here to enable the eic7700 pinctrl driver
-
 config PINCTRL_EP93XX
 	bool
 	depends on ARCH_EP93XX || COMPILE_TEST
@@ -248,6 +235,16 @@ config PINCTRL_EQUILIBRIUM
 	  control frameworks. It provides interfaces to setup pin muxing, assign
 	  desired pin functions, configure GPIO attributes for LGM SoC pins.
 	  Pin muxing and pin config settings are retrieved from device tree.
+
+config PINCTRL_EIC7700
+	tristate "EIC7700 PINCTRL driver"
+	select GENERIC_PINCONF
+	select PINMUX
+	select PINCONF
+	select GENERIC_PINCTRL_GROUPS
+	select GENERIC_PINMUX_FUNCTIONS
+	help
+	  say Y here to add pinctrl eic7700 driver
 
 config PINCTRL_EYEQ5
 	bool "Mobileye EyeQ5 pinctrl driver"

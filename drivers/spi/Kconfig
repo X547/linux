@@ -404,6 +404,12 @@ config SPI_EP93XX
 	  This enables using the Cirrus EP93xx SPI controller in master
 	  mode.
 
+config SPI_ESWIN_BOOTSPI
+	tristate "Eswin Computing Boot SPI controller"
+	help
+	  This enables using the Eswin Computing Boot SPI controller in master
+	  mode.
+
 config SPI_FALCON
 	bool "Falcon SPI controller support"
 	depends on SOC_FALCON
@@ -1084,6 +1090,15 @@ config SPI_SG2044_NOR
 	  which supports Dual/Quad read and write operations while
 	  also supporting 3Byte address devices and 4Byte address
 	  devices.
+
+config SPI_SPACEMIT_K1
+	tristate "K1 SPI Controller"
+	depends on ARCH_SPACEMIT || COMPILE_TEST
+	depends on OF
+	imply MMP_PDMA if ARCH_SPACEMIT
+	default m if ARCH_SPACEMIT
+	help
+	  Enable support for the SpacemiT K1 SPI controller.
 
 config SPI_SPRD
 	tristate "Spreadtrum SPI controller"

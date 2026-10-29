@@ -3,6 +3,6 @@
 # Eswin Clock specific Makefile
 #
 
-obj-$(CONFIG_COMMON_CLK_ESWIN)		+= clk.o
+obj-y	+= clk.o
 
 obj-$(CONFIG_COMMON_CLK_EIC7700)	+= clk-eic7700.o

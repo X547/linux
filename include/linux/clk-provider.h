@@ -136,6 +136,10 @@ struct clk_duty {
  *		0. Returns the calculated rate. Optional, but recommended - if
  *		this op is not set then clock rate will be initialized to 0.
  *
+ * @round_rate:	Given a target rate as input, returns the closest rate actually
+ *		supported by the clock. The parent rate is an input/output
+ *		parameter.
+ *
  * @determine_rate: Given a target rate as input, returns the closest rate
  *		actually supported by the clock, and optionally the parent clock
  *		that should be used to provide the clock rate.
@@ -159,13 +163,13 @@ struct clk_duty {
  *
  * @set_rate:	Change the rate of this clock. The requested rate is specified
  *		by the second argument, which should typically be the return
- *		of .determine_rate call.  The third argument gives the parent
- *		rate which is likely helpful for most .set_rate implementation.
+ *		of .round_rate call.  The third argument gives the parent rate
+ *		which is likely helpful for most .set_rate implementation.
  *		Returns 0 on success, -EERROR otherwise.
  *
  * @set_rate_and_parent: Change the rate and the parent of this clock. The
  *		requested rate is specified by the second argument, which
- *		should typically be the return of clk_round_rate() call.  The
+ *		should typically be the return of .round_rate call.  The
  *		third argument gives the parent rate which is likely helpful
  *		for most .set_rate_and_parent implementation. The fourth
  *		argument gives the parent index. This callback is optional (and
@@ -240,6 +244,8 @@ struct clk_ops {
 	void		(*restore_context)(struct clk_hw *hw);
 	unsigned long	(*recalc_rate)(struct clk_hw *hw,
 					unsigned long parent_rate);
+	long		(*round_rate)(struct clk_hw *hw, unsigned long rate,
+					unsigned long *parent_rate);
 	int		(*determine_rate)(struct clk_hw *hw,
 					  struct clk_rate_request *req);
 	int		(*set_parent)(struct clk_hw *hw, u8 index);
@@ -673,7 +679,7 @@ struct clk_div_table {
  * @lock:	register lock
  *
  * Clock with an adjustable divider affecting its output frequency.  Implements
- * .recalc_rate, .set_rate and .determine_rate
+ * .recalc_rate, .set_rate and .round_rate
  *
  * @flags:
  * CLK_DIVIDER_ONE_BASED - by default the divisor is the value read from the
@@ -1132,7 +1138,7 @@ void of_fixed_factor_clk_setup(struct device_node *node);
  *
  * Clock with a fixed multiplier and divider. The output frequency is the
  * parent clock rate divided by div and multiplied by mult.
- * Implements .recalc_rate, .set_rate, .determine_rate and .recalc_accuracy
+ * Implements .recalc_rate, .set_rate, .round_rate and .recalc_accuracy
  *
  * Flags:
  * * CLK_FIXED_FACTOR_FIXED_ACCURACY - Use the value in @acc instead of the
@@ -1260,7 +1266,7 @@ void clk_hw_unregister_fractional_divider(struct clk_hw *hw);
  * @lock:	register lock
  *
  * Clock with an adjustable multiplier affecting its output frequency.
- * Implements .recalc_rate, .set_rate and .determine_rate
+ * Implements .recalc_rate, .set_rate and .round_rate
  *
  * @flags:
  * CLK_MULTIPLIER_ZERO_BYPASS - By default, the multiplier is the value read

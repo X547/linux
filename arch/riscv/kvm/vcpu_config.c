@@ -80,7 +80,9 @@ void kvm_riscv_vcpu_config_load(struct kvm_vcpu *vcpu)
 		nsh = nacl_shmem();
 		nacl_csr_write(nsh, CSR_HEDELEG, cfg->hedeleg);
 		nacl_csr_write(nsh, CSR_HIDELEG, cfg->hideleg);
+#ifndef CONFIG_SOC_SIFIVE_EIC7700
 		nacl_csr_write(nsh, CSR_HENVCFG, cfg->henvcfg);
+#endif
 		if (IS_ENABLED(CONFIG_32BIT))
 			nacl_csr_write(nsh, CSR_HENVCFGH, cfg->henvcfg >> 32);
 		if (riscv_has_extension_unlikely(RISCV_ISA_EXT_SMSTATEEN)) {
@@ -91,7 +93,9 @@ void kvm_riscv_vcpu_config_load(struct kvm_vcpu *vcpu)
 	} else {
 		csr_write(CSR_HEDELEG, cfg->hedeleg);
 		csr_write(CSR_HIDELEG, cfg->hideleg);
+#ifndef CONFIG_SOC_SIFIVE_EIC7700
 		csr_write(CSR_HENVCFG, cfg->henvcfg);
+#endif
 		if (IS_ENABLED(CONFIG_32BIT))
 			csr_write(CSR_HENVCFGH, cfg->henvcfg >> 32);
 		if (riscv_has_extension_unlikely(RISCV_ISA_EXT_SMSTATEEN)) {

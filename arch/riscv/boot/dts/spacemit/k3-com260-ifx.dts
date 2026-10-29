@@ -1,0 +1,204 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Copyright (c) 2026 SpacemiT (Hangzhou) Technology Co. Ltd
+ * Copyright (c) 2026 Yixun Lan <dlan@kernel.org>
+ */
+#include <dt-bindings/phy/phy.h>
+
+#include "k3-com260.dtsi"
+
+/ {
+	model = "SpacemiT K3 CoM260 IFX";
+	compatible = "spacemit,k3-com260-ifx", "spacemit,k3-com260", "spacemit,k3";
+
+	aliases {
+		serial0 = &uart0;
+		ethernet0 = &eth1;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	hub_reset: hub-reset {
+		compatible = "regulator-fixed";
+		regulator-name = "hub-reset";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		enable-active-high;
+		regulator-boot-on;
+		gpio = <&gpio 1 21 0>;
+	};
+};
+
+&combophy {
+	spacemit,apmu = <&syscon_apmu 0x14>;
+	status = "okay";
+};
+
+&i2c0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c0_0_cfg>;
+	status = "okay";
+
+	tcpc@25 {
+		compatible = "onsemi,fusb301";
+		reg = <0x25>;
+		irq-gpios = <&gpio 1 26 GPIO_ACTIVE_LOW>;
+		suspend-vbus-off;
+		wakeup-source;
+		status = "okay";
+
+		typec_0: connector@0 {
+			compatible = "usb-c-connector";
+			label = "USB-C";
+			data-role = "dual";
+			power-role = "dual";
+			try-power-role = "sink";
+			typec-power-opmode = "default";
+			pd-disable;
+
+			ports {
+				#address-cells = <0x1>;
+				#size-cells = <0x0>;
+
+				port@0 {
+					reg = <0x0>;
+					fusb301_ep: endpoint {
+						remote-endpoint = <&porta_role_switch>;
+					};
+				};
+
+				port@1 {
+					reg = <0x1>;
+					fusb301_sw_ep: endpoint {
+						remote-endpoint = <&usb3_phy_switch>;
+					};
+				};
+			};
+		};
+	};
+};
+
+
+&pcie0_rc {
+	/* M.2 M-Key 2280 slot */
+	pinctrl-names = "default";
+	pinctrl-0 = <&pcie0_1_cfg>;
+	phys = <&combophy 0 PHY_TYPE_PCIE>, <&combophy 1 PHY_TYPE_PCIE>;
+	phy-names = "phy0", "phy1";
+	num-lanes = <4>;
+	status = "okay";
+};
+
+&pcie3_rc {
+	/* M.2 M-Key 2230 slot */
+	pinctrl-names = "default";
+	pinctrl-0 = <&pcie3_0_cfg>;
+	phys = <&combophy 4 PHY_TYPE_PCIE>;
+	phy-names = "phy4";
+	status = "okay";
+};
+
+&pcie4_rc {
+	/* M.2 E-Key 2230 slot (Wi-Fi/BT) */
+	pinctrl-names = "default";
+	pinctrl-0 = <&pcie4_1_cfg>;
+	phys = <&combophy 5 PHY_TYPE_PCIE>;
+	phy-names = "phy5";
+	num-lanes = <1>;
+	status = "okay";
+};
+
+&usb2_host {
+	/* M.2 E-Key 2230 slot (Wi-Fi/BT) */
+	status = "okay";
+};
+
+&usb2_phy {
+	status = "okay";
+};
+
+&usb3a_u2phy {
+	status = "okay";
+};
+
+&usb3a_u3phy {
+	orientation-switch;
+	status = "okay";
+
+	port {
+		usb3_phy_switch: endpoint {
+			remote-endpoint = <&fusb301_sw_ep>;
+		};
+	};
+};
+
+&usb3a {
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";
+	monitor-vbus;
+	reset-on-resume;
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		port@0 {
+			reg = <0x0>;
+			porta_role_switch: endpoint {
+				remote-endpoint = <&fusb301_ep>;
+			};
+		};
+	};
+};
+
+&usb3b {
+	/* USB 3.0 Type-A 4-port hub */
+	phys = <&combophy 2 PHY_TYPE_USB3>, <&usb3b_u2phy>;
+	phy-names = "usb3-phy", "usb2-phy";
+	reset-on-resume;
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	/* VL817 USB2.0 hub (4 ports) */
+	hub_2_0: hub@1 {
+		compatible = "usb2109,2817";
+		reg = <1>;
+		peer-hub = <&hub_3_0>;
+		vdd-supply = <&hub_reset>;
+	};
+
+	/* VL817 USB3.0 hub (4 ports) */
+	hub_3_0: hub@2 {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		compatible = "usb2109,817";
+		reg = <2>;
+		peer-hub = <&hub_2_0>;
+	};
+};
+
+&sdhci0 {
+	pinctrl-names = "default","uhs";
+	pinctrl-0 = <&mmc1_cfg>;
+	pinctrl-1 = <&mmc1_uhs_cfg>;
+	bus-width = <4>;
+	cd-gpios = <&gpio K3_GPIO(4) GPIO_ACTIVE_HIGH>;
+	no-mmc;
+	no-sdio;
+	disable-wp;
+	cap-sd-highspeed;
+	vmmc-supply = <&aldo4>;
+	vqmmc-supply = <&aldo1>;
+	sd-uhs-sdr25;
+	sd-uhs-sdr50;
+	sd-uhs-sdr104;
+	status = "okay";
+};
+
+&ufshc {
+	status = "okay";
+};

@@ -1,287 +1,498 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Eswin DWC Ethernet linux driver
- *
- * Copyright 2025, Beijing ESWIN Computing Technology Co., Ltd.
- *
- * Authors:
- *   Zhi Li <lizhi2@eswincomputing.com>
- *   Shuang Liang <liangshuang@eswincomputing.com>
- *   Shangjuan Wei <weishangjuan@eswincomputing.com>
  */
 
-#include <linux/platform_device.h>
+#include <linux/clk.h>
+#include <linux/clk-provider.h>
+#include <linux/device.h>
+#include <linux/gpio/consumer.h>
+#include <linux/ethtool.h>
+#include <linux/io.h>
+#include <linux/iopoll.h>
+#include <linux/ioport.h>
+#include <linux/module.h>
+#include <linux/of_device.h>
+#include <linux/of_net.h>
 #include <linux/mfd/syscon.h>
-#include <linux/pm_runtime.h>
+#include <linux/platform_device.h>
+#include <linux/reset.h>
 #include <linux/stmmac.h>
-#include <linux/regmap.h>
-#include <linux/of.h>
-
 #include "stmmac_platform.h"
+#include "dwmac4.h"
+#include <linux/mfd/syscon.h>
+#include <linux/bitfield.h>
+#include <linux/regmap.h>
+#include <linux/gpio/consumer.h>
 
-/* eth_phy_ctrl_offset eth0:0x100 */
-#define EIC7700_ETH_TX_CLK_SEL		BIT(16)
-#define EIC7700_ETH_PHY_INTF_SELI	BIT(0)
+/* eth_phy_ctrl_offset eth0:0x100; eth1:0x200 */
+#define ETH_TX_CLK_SEL          BIT(16)
+#define ETH_PHY_INTF_SELI       BIT(0)
 
-/* eth_axi_lp_ctrl_offset eth0:0x108 */
-#define EIC7700_ETH_CSYSREQ_VAL		BIT(0)
+/* eth_axi_lp_ctrl_offset eth0:0x108; eth1:0x208 */
+#define ETH_CSYSREQ_VAL         BIT(0)
 
-/*
- * TX/RX Clock Delay Bit Masks:
- * - TX Delay: bits [14:8] — TX_CLK delay (unit: 0.02ns per bit)
- * - RX Delay: bits [30:24] — RX_CLK delay (unit: 0.02ns per bit)
- */
-#define EIC7700_ETH_TX_ADJ_DELAY	GENMASK(14, 8)
-#define EIC7700_ETH_RX_ADJ_DELAY	GENMASK(30, 24)
+/* hsp_aclk_ctrl_offset (0x148) */
+#define HSP_ACLK_CLKEN           BIT(31)
+#define HSP_ACLK_DIVSOR          (0x2 << 4)
 
-#define EIC7700_MAX_DELAY_STEPS		0x7F
-#define EIC7700_DELAY_STEP_PS		20
-#define EIC7700_MAX_DELAY_PS	\
-	(EIC7700_MAX_DELAY_STEPS * EIC7700_DELAY_STEP_PS)
+/* hsp_cfg_ctrl_offset (0x14c) */
+#define HSP_CFG_CLKEN            BIT(31)
+#define SCU_HSP_PCLK_EN          BIT(30)
+#define HSP_CFG_CTRL_REGSET      (HSP_CFG_CLKEN | SCU_HSP_PCLK_EN)
 
-static const char * const eic7700_clk_names[] = {
-	"tx", "axi", "cfg",
+/* RTL8211F PHY Configurations for LEDs */
+#define PHY_ADDR                 0
+#define PHY_PAGE_SWITCH_REG      31
+#define PHY_LED_CFG_REG          16
+#define PHY_LED_PAGE_CFG         0xd04
+
+struct dwc_qos_priv {
+	struct device *dev;
+	int dev_id;
+	struct regmap *crg_regmap;
+	struct regmap *hsp_regmap;
+	struct reset_control *rst;
+	struct clk *clk_app;
+	struct clk *clk_tx;
+	struct regmap *rgmii_sel;
+	struct gpio_desc *phy_reset;
+	struct stmmac_priv *stmpriv;
+	int phyled_cfgs[3];
 };
 
-struct eic7700_qos_priv {
-	struct plat_stmmacenet_data *plat_dat;
-	struct regmap *eic7700_hsp_regmap;
-	u32 eth_axi_lp_ctrl_offset;
-	u32 eth_phy_ctrl_offset;
-	u32 eth_clk_offset;
-	u32 eth_txd_offset;
-	u32 eth_rxd_offset;
-	u32 eth_clk_dly_param;
-	bool has_txd_offset;
-	bool has_rxd_offset;
-};
-
-static int eic7700_clks_config(void *priv, bool enabled)
+static int dwc_eth_dwmac_config_dt(struct platform_device *pdev,
+				   struct plat_stmmacenet_data *plat_dat)
 {
-	struct eic7700_qos_priv *dwc = (struct eic7700_qos_priv *)priv;
-	struct plat_stmmacenet_data *plat = dwc->plat_dat;
-	int ret = 0;
+	struct device *dev = &pdev->dev;
+	u32 burst_map = 0;
+	u32 bit_index = 0;
+	u32 a_index = 0;
 
-	if (enabled)
-		ret = clk_bulk_prepare_enable(plat->num_clks, plat->clks);
-	else
-		clk_bulk_disable_unprepare(plat->num_clks, plat->clks);
+	if (!plat_dat->axi) {
+		plat_dat->axi = kzalloc(sizeof(struct stmmac_axi), GFP_KERNEL);
 
-	return ret;
-}
-
-static int eic7700_dwmac_init(struct device *dev, void *priv)
-{
-	struct eic7700_qos_priv *dwc = priv;
-	int ret;
-
-	ret = eic7700_clks_config(dwc, true);
-	if (ret)
-		return ret;
-
-	ret = regmap_set_bits(dwc->eic7700_hsp_regmap,
-			      dwc->eth_phy_ctrl_offset,
-			      EIC7700_ETH_TX_CLK_SEL |
-			      EIC7700_ETH_PHY_INTF_SELI);
-	if (ret) {
-		eic7700_clks_config(dwc, false);
-		return ret;
+		if (!plat_dat->axi)
+			return -ENOMEM;
 	}
 
-	regmap_write(dwc->eic7700_hsp_regmap, dwc->eth_axi_lp_ctrl_offset,
-		     EIC7700_ETH_CSYSREQ_VAL);
+	plat_dat->axi->axi_lpi_en = device_property_read_bool(dev,
+							      "snps,en-lpi");
+	if (device_property_read_u32(dev, "snps,write-requests",
+				     &plat_dat->axi->axi_wr_osr_lmt)) {
+		/**
+		 * Since the register has a reset value of 1, if property
+		 * is missing, default to 1.
+		 */
+		plat_dat->axi->axi_wr_osr_lmt = 1;
+	} else {
+		/**
+		 * If property exists, to keep the behavior from dwc_eth_qos,
+		 * subtract one after parsing.
+		 */
+		plat_dat->axi->axi_wr_osr_lmt--;
+	}
 
-	if (dwc->has_txd_offset)
-		regmap_write(dwc->eic7700_hsp_regmap, dwc->eth_txd_offset, 0);
+	if (device_property_read_u32(dev, "snps,read-requests",
+				     &plat_dat->axi->axi_rd_osr_lmt)) {
+		/**
+		 * Since the register has a reset value of 1, if property
+		 * is missing, default to 1.
+		 */
+		plat_dat->axi->axi_rd_osr_lmt = 1;
+	} else {
+		/**
+		 * If property exists, to keep the behavior from dwc_eth_qos,
+		 * subtract one after parsing.
+		 */
+		plat_dat->axi->axi_rd_osr_lmt--;
+	}
+	device_property_read_u32(dev, "snps,burst-map", &burst_map);
 
-	if (dwc->has_rxd_offset)
-		regmap_write(dwc->eic7700_hsp_regmap, dwc->eth_rxd_offset, 0);
+	/* converts burst-map bitmask to burst array */
+	for (bit_index = 0; bit_index < 7; bit_index++) {
+		if (burst_map & (1 << bit_index)) {
+			switch (bit_index) {
+			case 0:
+			plat_dat->axi->axi_blen[a_index] = 4; break;
+			case 1:
+			plat_dat->axi->axi_blen[a_index] = 8; break;
+			case 2:
+			plat_dat->axi->axi_blen[a_index] = 16; break;
+			case 3:
+			plat_dat->axi->axi_blen[a_index] = 32; break;
+			case 4:
+			plat_dat->axi->axi_blen[a_index] = 64; break;
+			case 5:
+			plat_dat->axi->axi_blen[a_index] = 128; break;
+			case 6:
+			plat_dat->axi->axi_blen[a_index] = 256; break;
+			default:
+			break;
+			}
+			a_index++;
+		}
+	}
 
-	regmap_write(dwc->eic7700_hsp_regmap, dwc->eth_clk_offset,
-		     dwc->eth_clk_dly_param);
+	/* dwc-qos needs GMAC4, AAL, TSO and PMT */
+	plat_dat->core_type = DWMAC_CORE_GMAC4;
+	plat_dat->dma_cfg->aal = 1;
+	plat_dat->flags |= STMMAC_FLAG_TSO_EN;
+	plat_dat->pmt = 1;
 
 	return 0;
 }
 
-static void eic7700_dwmac_exit(struct device *dev, void *priv)
+static void dwc_qos_fix_speed(void *priv, phy_interface_t interface, int speed, unsigned int mode)
 {
-	struct eic7700_qos_priv *dwc = priv;
+	unsigned long rate = 125000000;
+	int err, data = 0;
+	struct dwc_qos_priv *dwc_priv = (struct dwc_qos_priv *)priv;
 
-	eic7700_clks_config(dwc, false);
+	switch (speed) {
+	case SPEED_1000:
+		rate = 125000000;
+
+		if (dwc_priv->dev_id == 0) {
+			regmap_write(dwc_priv->hsp_regmap, 0x118, 0x800c8023);
+			regmap_write(dwc_priv->hsp_regmap, 0x11c, 0x0c0c0c0c);
+			regmap_write(dwc_priv->hsp_regmap, 0x114, 0x23232323);
+		} else {
+			regmap_write(dwc_priv->hsp_regmap, 0x218, 0x80268025);
+			regmap_write(dwc_priv->hsp_regmap, 0x21c, 0x26262626);
+			regmap_write(dwc_priv->hsp_regmap, 0x214, 0x25252525);
+		}
+
+		if (dwc_priv->stmpriv) {
+			data = mdiobus_read(dwc_priv->stmpriv->mii, PHY_ADDR, PHY_PAGE_SWITCH_REG);
+			mdiobus_write(dwc_priv->stmpriv->mii, PHY_ADDR, PHY_PAGE_SWITCH_REG, PHY_LED_PAGE_CFG);
+			mdiobus_write(dwc_priv->stmpriv->mii, PHY_ADDR, PHY_LED_CFG_REG, dwc_priv->phyled_cfgs[0]);
+			mdiobus_write(dwc_priv->stmpriv->mii, PHY_ADDR, PHY_PAGE_SWITCH_REG, data);
+		}
+
+		break;
+	case SPEED_100:
+		rate = 25000000;
+
+		if (dwc_priv->dev_id == 0) {
+			regmap_write(dwc_priv->hsp_regmap, 0x118, 0x803f8050);
+			regmap_write(dwc_priv->hsp_regmap, 0x11c, 0x3f3f3f3f);
+			regmap_write(dwc_priv->hsp_regmap, 0x114, 0x50505050);
+		} else {
+			regmap_write(dwc_priv->hsp_regmap, 0x218, 0x80588048);
+			regmap_write(dwc_priv->hsp_regmap, 0x21c, 0x58585858);
+			regmap_write(dwc_priv->hsp_regmap, 0x214, 0x48484848);
+		}
+
+		if (dwc_priv->stmpriv) {
+			data = mdiobus_read(dwc_priv->stmpriv->mii, PHY_ADDR, PHY_PAGE_SWITCH_REG);
+			mdiobus_write(dwc_priv->stmpriv->mii, PHY_ADDR, PHY_PAGE_SWITCH_REG, PHY_LED_PAGE_CFG);
+			mdiobus_write(dwc_priv->stmpriv->mii, PHY_ADDR, PHY_LED_CFG_REG, dwc_priv->phyled_cfgs[1]);
+			mdiobus_write(dwc_priv->stmpriv->mii, PHY_ADDR, PHY_PAGE_SWITCH_REG, data);
+		}
+
+		break;
+	case SPEED_10:
+		rate = 2500000;
+
+		if (dwc_priv->dev_id == 0) {
+			regmap_write(dwc_priv->hsp_regmap, 0x118, 0x0);
+			regmap_write(dwc_priv->hsp_regmap, 0x11c, 0x0);
+			regmap_write(dwc_priv->hsp_regmap, 0x114, 0x0);
+		} else {
+			regmap_write(dwc_priv->hsp_regmap, 0x218, 0x0);
+			regmap_write(dwc_priv->hsp_regmap, 0x21c, 0x0);
+			regmap_write(dwc_priv->hsp_regmap, 0x214, 0x0);
+		}
+
+		if (dwc_priv->stmpriv) {
+			data = mdiobus_read(dwc_priv->stmpriv->mii, PHY_ADDR, PHY_PAGE_SWITCH_REG);
+			mdiobus_write(dwc_priv->stmpriv->mii, PHY_ADDR, PHY_PAGE_SWITCH_REG, PHY_LED_PAGE_CFG);
+			mdiobus_write(dwc_priv->stmpriv->mii, PHY_ADDR, PHY_LED_CFG_REG, dwc_priv->phyled_cfgs[2]);
+			mdiobus_write(dwc_priv->stmpriv->mii, PHY_ADDR, PHY_PAGE_SWITCH_REG, data);
+		}
+
+		break;
+	default:
+		dev_err(dwc_priv->dev, "invalid speed %d\n", speed);
+		break;
+	}
+
+	err = clk_set_rate(dwc_priv->clk_tx, rate);
+	if (err < 0)
+	{
+		dev_err(dwc_priv->dev, "failed to set TX rate: %d\n", err);
+	}
 }
 
-static int eic7700_dwmac_suspend(struct device *dev, void *priv)
+static int dwc_qos_probe(struct platform_device *pdev,
+			 struct plat_stmmacenet_data *plat_dat,
+			 struct stmmac_resources *stmmac_res)
 {
-	return pm_runtime_force_suspend(dev);
-}
-
-static int eic7700_dwmac_resume(struct device *dev, void *priv)
-{
+	struct dwc_qos_priv *dwc_priv;
 	int ret;
-
-	ret = pm_runtime_force_resume(dev);
-	if (ret)
-		dev_err(dev, "%s failed: %d\n", __func__, ret);
-
-	return ret;
-}
-
-static int eic7700_dwmac_probe(struct platform_device *pdev)
-{
-	struct plat_stmmacenet_data *plat_dat;
-	struct stmmac_resources stmmac_res;
-	struct eic7700_qos_priv *dwc_priv;
-	u32 delay_ps, val;
-	int i, ret;
-
-	ret = stmmac_get_platform_resources(pdev, &stmmac_res);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret,
-				"failed to get resources\n");
-
-	plat_dat = devm_stmmac_probe_config_dt(pdev, stmmac_res.mac);
-	if (IS_ERR(plat_dat))
-		return dev_err_probe(&pdev->dev, PTR_ERR(plat_dat),
-				"dt configuration failed\n");
+	int err;
+	u32 hsp_aclk_ctrl_offset;
+	u32 hsp_aclk_ctrl_regset;
+	u32 hsp_cfg_ctrl_offset;
+	u32 eth_axi_lp_ctrl_offset;
+	u32 eth_phy_ctrl_offset;
+	u32 eth_phy_ctrl_regset;
+	u32 rgmiisel_offset;
+	u32 rgmiisel_regset;
 
 	dwc_priv = devm_kzalloc(&pdev->dev, sizeof(*dwc_priv), GFP_KERNEL);
 	if (!dwc_priv)
 		return -ENOMEM;
 
-	/* Read rx-internal-delay-ps and update rx_clk delay */
-	if (!of_property_read_u32(pdev->dev.of_node,
-				  "rx-internal-delay-ps", &delay_ps)) {
-		if (delay_ps % EIC7700_DELAY_STEP_PS)
-			return dev_err_probe(&pdev->dev, -EINVAL,
-				"rx delay must be multiple of %dps\n",
-				EIC7700_DELAY_STEP_PS);
-
-		if (delay_ps > EIC7700_MAX_DELAY_PS)
-			return dev_err_probe(&pdev->dev, -EINVAL,
-				"rx delay out of range\n");
-
-		val = delay_ps / EIC7700_DELAY_STEP_PS;
-
-		dwc_priv->eth_clk_dly_param &= ~EIC7700_ETH_RX_ADJ_DELAY;
-		dwc_priv->eth_clk_dly_param |=
-				 FIELD_PREP(EIC7700_ETH_RX_ADJ_DELAY, val);
-	} else {
-		return dev_err_probe(&pdev->dev, -EINVAL,
-			"missing required property rx-internal-delay-ps\n");
+	if (device_property_read_u32(&pdev->dev, "id", &dwc_priv->dev_id)) {
+		dev_err(&pdev->dev, "Can not read device id!\n");
+		return -EINVAL;
 	}
 
-	/* Read tx-internal-delay-ps and update tx_clk delay */
-	if (!of_property_read_u32(pdev->dev.of_node,
-				  "tx-internal-delay-ps", &delay_ps)) {
-		if (delay_ps % EIC7700_DELAY_STEP_PS)
-			return dev_err_probe(&pdev->dev, -EINVAL,
-				"tx delay must be multiple of %dps\n",
-				EIC7700_DELAY_STEP_PS);
-
-		if (delay_ps > EIC7700_MAX_DELAY_PS)
-			return dev_err_probe(&pdev->dev, -EINVAL,
-				"tx delay out of range\n");
-
-		val = delay_ps / EIC7700_DELAY_STEP_PS;
-
-		dwc_priv->eth_clk_dly_param &= ~EIC7700_ETH_TX_ADJ_DELAY;
-		dwc_priv->eth_clk_dly_param |=
-				 FIELD_PREP(EIC7700_ETH_TX_ADJ_DELAY, val);
-	} else {
-		return dev_err_probe(&pdev->dev, -EINVAL,
-			"missing required property tx-internal-delay-ps\n");
+	dwc_priv->dev = &pdev->dev;
+	dwc_priv->phy_reset = devm_gpiod_get(&pdev->dev, "rst", GPIOD_OUT_LOW);
+	if (IS_ERR(dwc_priv->phy_reset)) {
+		dev_err(&pdev->dev, "Reset gpio not specified\n");
+		return -EINVAL;
 	}
 
-	dwc_priv->eic7700_hsp_regmap =
-			syscon_regmap_lookup_by_phandle(pdev->dev.of_node,
-							"eswin,hsp-sp-csr");
-	if (IS_ERR(dwc_priv->eic7700_hsp_regmap))
-		return dev_err_probe(&pdev->dev,
-				PTR_ERR(dwc_priv->eic7700_hsp_regmap),
-				"Failed to get hsp-sp-csr regmap\n");
+	gpiod_set_value(dwc_priv->phy_reset, 0);
 
-	ret = of_property_read_u32_index(pdev->dev.of_node,
-					 "eswin,hsp-sp-csr",
-					 1, &dwc_priv->eth_phy_ctrl_offset);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret,
-				     "can't get eth_phy_ctrl_offset\n");
+	dwc_priv->rgmii_sel = syscon_regmap_lookup_by_phandle(pdev->dev.of_node, "eswin,rgmiisel");
+	if (IS_ERR(dwc_priv->rgmii_sel)){
+		dev_dbg(&pdev->dev, "rgmiisel not specified\n");
+		return -EINVAL;
+	}
 
-	ret = of_property_read_u32_index(pdev->dev.of_node,
-					 "eswin,hsp-sp-csr",
-					 2, &dwc_priv->eth_axi_lp_ctrl_offset);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret,
-				     "can't get eth_axi_lp_ctrl_offset\n");
+	ret = of_property_read_u32_index(pdev->dev.of_node, "eswin,led-cfgs", 0, &dwc_priv->phyled_cfgs[0]);
+	if (ret) {
+		dev_warn(&pdev->dev, "can't get led cfgs for 1Gbps mode (%d)\n", ret);
+	}
 
-	ret = of_property_read_u32_index(pdev->dev.of_node,
-					 "eswin,hsp-sp-csr",
-					 3, &dwc_priv->eth_clk_offset);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret,
-				     "can't get eth_clk_offset\n");
+	ret = of_property_read_u32_index(pdev->dev.of_node, "eswin,led-cfgs", 1, &dwc_priv->phyled_cfgs[1]);
+	if (ret) {
+		dev_warn(&pdev->dev, "can't get led cfgs for 100Mbps mode (%d)\n", ret);
+	}
 
-	ret = of_property_read_u32_index(pdev->dev.of_node,
-					 "eswin,hsp-sp-csr",
-					 4, &dwc_priv->eth_txd_offset);
-	if (!ret)
-		dwc_priv->has_txd_offset = true;
+	ret = of_property_read_u32_index(pdev->dev.of_node, "eswin,led-cfgs", 2, &dwc_priv->phyled_cfgs[2]);
+	if (ret) {
+		dev_warn(&pdev->dev, "can't get led cfgs for 10Mbps mode (%d)\n", ret);
+	}
 
-	ret = of_property_read_u32_index(pdev->dev.of_node,
-					 "eswin,hsp-sp-csr",
-					 5, &dwc_priv->eth_rxd_offset);
-	if (!ret)
-		dwc_priv->has_rxd_offset = true;
+	ret = of_property_read_u32_index(pdev->dev.of_node, "eswin,rgmiisel", 1, &rgmiisel_offset);
+	if (ret) {
+		dev_err(&pdev->dev, "can't get rgmiisel_offset (%d)\n", ret);
+		return ret;
+	}
 
-	plat_dat->num_clks = ARRAY_SIZE(eic7700_clk_names);
-	plat_dat->clks = devm_kcalloc(&pdev->dev,
-				      plat_dat->num_clks,
-				      sizeof(*plat_dat->clks),
-				      GFP_KERNEL);
-	if (!plat_dat->clks)
-		return -ENOMEM;
+	ret = of_property_read_u32_index(pdev->dev.of_node, "eswin,rgmiisel", 2, &rgmiisel_regset);
+	if (ret) {
+		dev_err(&pdev->dev, "can't get rgmiisel_regset (%d)\n", ret);
+		return ret;
+	}
 
-	for (i = 0; i < ARRAY_SIZE(eic7700_clk_names); i++)
-		plat_dat->clks[i].id = eic7700_clk_names[i];
+	regmap_write(dwc_priv->rgmii_sel, rgmiisel_offset, rgmiisel_regset);
 
-	ret = devm_clk_bulk_get_optional(&pdev->dev,
-					 plat_dat->num_clks,
-					 plat_dat->clks);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret,
-				     "Failed to get clocks\n");
+	dwc_priv->crg_regmap = syscon_regmap_lookup_by_phandle(pdev->dev.of_node, "eswin,syscrg_csr");
+	if (IS_ERR(dwc_priv->crg_regmap)){
+		dev_dbg(&pdev->dev, "No syscrg_csr phandle specified\n");
+		return 0;
+	}
 
-	plat_dat->clk_tx_i = stmmac_pltfr_find_clk(plat_dat, "tx");
-	plat_dat->set_clk_tx_rate = stmmac_set_clk_tx_rate;
-	plat_dat->clks_config = eic7700_clks_config;
+	ret = of_property_read_u32_index(pdev->dev.of_node, "eswin,syscrg_csr", 1,
+                                    &hsp_aclk_ctrl_offset);
+	if (ret) {
+		dev_err(&pdev->dev, "can't get hsp_aclk_ctrl_offset (%d)\n", ret);
+		return ret;
+	}
+	regmap_read(dwc_priv->crg_regmap, hsp_aclk_ctrl_offset, &hsp_aclk_ctrl_regset);
+	hsp_aclk_ctrl_regset |= (HSP_ACLK_CLKEN | HSP_ACLK_DIVSOR);
+	regmap_write(dwc_priv->crg_regmap, hsp_aclk_ctrl_offset, hsp_aclk_ctrl_regset);
+
+	ret = of_property_read_u32_index(pdev->dev.of_node, "eswin,syscrg_csr", 2,
+                                    &hsp_cfg_ctrl_offset);
+	if (ret) {
+		dev_err(&pdev->dev, "can't get hsp_cfg_ctrl_offset (%d)\n", ret);
+		return ret;
+	}
+	regmap_write(dwc_priv->crg_regmap, hsp_cfg_ctrl_offset, HSP_CFG_CTRL_REGSET);
+
+	dwc_priv->hsp_regmap = syscon_regmap_lookup_by_phandle(pdev->dev.of_node, "eswin,hsp_sp_csr");
+	if (IS_ERR(dwc_priv->hsp_regmap)){
+		dev_dbg(&pdev->dev, "No hsp_sp_csr phandle specified\n");
+		return 0;
+	}
+
+	ret = of_property_read_u32_index(pdev->dev.of_node, "eswin,hsp_sp_csr", 2,
+                                    &eth_phy_ctrl_offset);
+	if (ret) {
+		dev_err(&pdev->dev, "can't get eth_phy_ctrl_offset (%d)\n", ret);
+		return ret;
+	}
+	regmap_read(dwc_priv->hsp_regmap, eth_phy_ctrl_offset, &eth_phy_ctrl_regset);
+	eth_phy_ctrl_regset |= (ETH_TX_CLK_SEL | ETH_PHY_INTF_SELI);
+	regmap_write(dwc_priv->hsp_regmap, eth_phy_ctrl_offset, eth_phy_ctrl_regset);
+
+	ret = of_property_read_u32_index(pdev->dev.of_node, "eswin,hsp_sp_csr", 3,
+                                    &eth_axi_lp_ctrl_offset);
+	if (ret) {
+		dev_err(&pdev->dev, "can't get eth_axi_lp_ctrl_offset (%d)\n", ret);
+		return ret;
+	}
+	regmap_write(dwc_priv->hsp_regmap, eth_axi_lp_ctrl_offset, ETH_CSYSREQ_VAL);
+
+	dwc_priv->clk_app = devm_clk_get(&pdev->dev, "app");
+	if (IS_ERR(dwc_priv->clk_app)) {
+		dev_err(&pdev->dev, "app clock not found.\n");
+		return PTR_ERR(dwc_priv->clk_app);
+	}
+
+	err = clk_prepare_enable(dwc_priv->clk_app);
+	if (err < 0) {
+		dev_err(&pdev->dev, "failed to enable app clock: %d\n",
+			err);
+		return err;
+	}
+
+	dwc_priv->clk_tx = devm_clk_get(&pdev->dev, "tx");
+	if (IS_ERR(plat_dat->pclk)) {
+		dev_err(&pdev->dev, "tx clock not found.\n");
+		return PTR_ERR(dwc_priv->clk_tx);
+	}
+
+	err = clk_prepare_enable(dwc_priv->clk_tx);
+	if (err < 0) {
+		dev_err(&pdev->dev, "failed to enable tx clock: %d\n",
+            err);
+		return err;
+	}
+	dwc_priv->rst = devm_reset_control_get_optional_exclusive(&pdev->dev, "ethrst");
+	if (IS_ERR(dwc_priv->rst)) {
+		return PTR_ERR(dwc_priv->rst);
+	}
+
+	ret = reset_control_assert(dwc_priv->rst);
+	WARN_ON(0 != ret);
+	ret = reset_control_deassert(dwc_priv->rst);
+	WARN_ON(0 != ret);
+
+	plat_dat->fix_mac_speed = dwc_qos_fix_speed;
 	plat_dat->bsp_priv = dwc_priv;
-	dwc_priv->plat_dat = plat_dat;
-	plat_dat->init = eic7700_dwmac_init;
-	plat_dat->exit = eic7700_dwmac_exit;
-	plat_dat->suspend = eic7700_dwmac_suspend;
-	plat_dat->resume = eic7700_dwmac_resume;
+	plat_dat->phy_addr = PHY_ADDR;
 
-	return devm_stmmac_pltfr_probe(pdev, plat_dat, &stmmac_res);
+	return 0;
 }
 
-static const struct of_device_id eic7700_dwmac_match[] = {
-	{ .compatible = "eswin,eic7700-qos-eth" },
+static void dwc_qos_remove(struct platform_device *pdev)
+{
+	struct dwc_qos_priv *dwc_priv = get_stmmac_bsp_priv(&pdev->dev);
+
+	reset_control_assert(dwc_priv->rst);
+	clk_disable_unprepare(dwc_priv->clk_tx);
+	clk_disable_unprepare(dwc_priv->clk_app);
+
+	devm_gpiod_put(&pdev->dev, dwc_priv->phy_reset);
+}
+
+struct dwc_eth_dwmac_data {
+	int (*probe)(struct platform_device *pdev,
+		     struct plat_stmmacenet_data *data,
+		     struct stmmac_resources *res);
+	void (*remove)(struct platform_device *pdev);
+};
+
+static const struct dwc_eth_dwmac_data dwc_qos_data = {
+	.probe = dwc_qos_probe,
+	.remove = dwc_qos_remove,
+};
+
+static int dwc_eth_dwmac_probe(struct platform_device *pdev)
+{
+	const struct dwc_eth_dwmac_data *data;
+	struct plat_stmmacenet_data *plat_dat;
+	struct stmmac_resources stmmac_res;
+	struct net_device *ndev = NULL;
+	struct stmmac_priv *stmpriv = NULL;
+	struct dwc_qos_priv *dwc_priv = NULL;
+	int ret;
+
+	data = device_get_match_data(&pdev->dev);
+
+	memset(&stmmac_res, 0, sizeof(struct stmmac_resources));
+
+	/**
+	 * Since stmmac_platform supports name IRQ only, basic platform
+	 * resource initialization is done in the glue logic.
+	 */
+	stmmac_res.irq = platform_get_irq(pdev, 0);
+	if (stmmac_res.irq < 0)
+		return stmmac_res.irq;
+	stmmac_res.wol_irq = stmmac_res.irq;
+	stmmac_res.addr = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(stmmac_res.addr))
+		return PTR_ERR(stmmac_res.addr);
+
+	plat_dat = devm_stmmac_probe_config_dt(pdev, stmmac_res.mac);
+	if (IS_ERR(plat_dat))
+		return PTR_ERR(plat_dat);
+
+	ret = data->probe(pdev, plat_dat, &stmmac_res);
+	if (ret < 0) {
+		if (ret != -EPROBE_DEFER)
+			dev_err(&pdev->dev, "failed to probe subdriver: %d\n",
+				ret);
+		return ret;
+	}
+
+	ret = dwc_eth_dwmac_config_dt(pdev, plat_dat);
+	if (ret)
+		goto remove;
+
+	ret = stmmac_dvr_probe(&pdev->dev, plat_dat, &stmmac_res);
+	if (ret)
+		goto remove;
+
+	ndev = dev_get_drvdata(&pdev->dev);
+	stmpriv = netdev_priv(ndev);
+	dwc_priv = (struct dwc_qos_priv *)plat_dat->bsp_priv;
+	dwc_priv->stmpriv = stmpriv;
+
+	return ret;
+
+remove:
+	data->remove(pdev);
+	return ret;
+}
+
+static void dwc_eth_dwmac_remove(struct platform_device *pdev)
+{
+	const struct dwc_eth_dwmac_data *data;
+
+	data = device_get_match_data(&pdev->dev);
+
+	stmmac_dvr_remove(&pdev->dev);
+
+	data->remove(pdev);
+}
+
+static const struct of_device_id dwc_eth_dwmac_match[] = {
+	{ .compatible = "eswin,eic7700-qos-eth", .data = &dwc_qos_data },
 	{ }
 };
-MODULE_DEVICE_TABLE(of, eic7700_dwmac_match);
+MODULE_DEVICE_TABLE(of, dwc_eth_dwmac_match);
 
-static struct platform_driver eic7700_dwmac_driver = {
-	.probe  = eic7700_dwmac_probe,
+static struct platform_driver eic7700_eth_dwmac_driver = {
+	.probe  = dwc_eth_dwmac_probe,
+	.remove = dwc_eth_dwmac_remove,
 	.driver = {
 		.name           = "eic7700-eth-dwmac",
 		.pm             = &stmmac_pltfr_pm_ops,
-		.of_match_table = eic7700_dwmac_match,
+		.of_match_table = dwc_eth_dwmac_match,
 	},
 };
-module_platform_driver(eic7700_dwmac_driver);
+module_platform_driver(eic7700_eth_dwmac_driver);
 
-MODULE_AUTHOR("Zhi Li <lizhi2@eswincomputing.com>");
-MODULE_AUTHOR("Shuang Liang <liangshuang@eswincomputing.com>");
-MODULE_AUTHOR("Shangjuan Wei <weishangjuan@eswincomputing.com>");
+MODULE_AUTHOR("Eswin");
 MODULE_DESCRIPTION("Eswin eic7700 qos ethernet driver");
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v2");
