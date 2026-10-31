@@ -638,7 +638,8 @@ int kvm_riscv_vcpu_mmio_return(struct kvm_vcpu *vcpu, struct kvm_run *run)
 	vcpu->arch.mmio_decode.return_handled = 1;
 	insn = vcpu->arch.mmio_decode.insn;
 
-	if (run->mmio.is_write)
+	/* A load to x0 is a read for its side effects only */
+	if (run->mmio.is_write || !((insn >> SH_RD) & MASK_RX))
 		goto done;
 
 	len = vcpu->arch.mmio_decode.len;
