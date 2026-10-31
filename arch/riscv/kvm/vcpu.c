@@ -967,6 +967,14 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 		 */
 		kvm_riscv_local_tlb_sanitize(vcpu);
 
+		/*
+		 * FENCE.I only affects the hart that executes it, so the
+		 * FENCE.I instructions the guest executed on another Host CPU
+		 * don't cover the instruction cache of this one.
+		 */
+		if (vcpu->arch.last_exit_cpu != vcpu->cpu)
+			local_flush_icache_all();
+
 		trace_kvm_entry(vcpu);
 
 		guest_timing_enter_irqoff();
