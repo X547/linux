@@ -20,6 +20,9 @@
 
 #define has_svinval()	riscv_has_extension_unlikely(RISCV_ISA_EXT_SVINVAL)
 
+/* The VCPU that entered the guest last on each Host CPU */
+static DEFINE_PER_CPU(struct kvm_vcpu *, kvm_riscv_last_vcpu);
+
 void kvm_riscv_local_hfence_gvma_vmid_gpa(unsigned long vmid,
 					  gpa_t gpa, gpa_t gpsz,
 					  unsigned long order)
@@ -160,7 +163,19 @@ void kvm_riscv_local_hfence_vvma_all(unsigned long vmid)
 
 void kvm_riscv_local_tlb_sanitize(struct kvm_vcpu *vcpu)
 {
-	unsigned long vmid;
+	unsigned long vmid = READ_ONCE(vcpu->kvm->arch.vmid.vmid);
+
+	/*
+	 * VS-stage TLB entries are tagged with the VMID, which all VCPUs of
+	 * the Guest share, and the guest ASID, but to the guest each VCPU is
+	 * a hart with a TLB of its own. A guest that uses one ASID for
+	 * different address spaces on different harts would see translations
+	 * another VCPU left on the current Host CPU, so flush them.
+	 */
+	if (__this_cpu_read(kvm_riscv_last_vcpu) != vcpu) {
+		__this_cpu_write(kvm_riscv_last_vcpu, vcpu);
+		kvm_riscv_local_hfence_vvma_all(vmid);
+	}
 
 	if (!kvm_riscv_gstage_vmid_bits() ||
 	    vcpu->arch.last_exit_cpu == vcpu->cpu)
@@ -177,7 +192,6 @@ void kvm_riscv_local_tlb_sanitize(struct kvm_vcpu *vcpu)
 	 * entries by VMID whenever underlying Host CPU changes for a VCPU.
 	 */
 
-	vmid = READ_ONCE(vcpu->kvm->arch.vmid.vmid);
 	kvm_riscv_local_hfence_gvma_vmid_all(vmid);
 
 	/*
